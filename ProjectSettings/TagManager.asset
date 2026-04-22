@@ -9,6 +9,7 @@ TagManager:
   - LitFull
   - Wall
   - Ground
+  - LitPartial
   layers:
   - Default
   - TransparentFX

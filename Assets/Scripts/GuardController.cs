@@ -17,14 +17,11 @@ public enum GuardState { Patrolling, Investigating, Chasing }
 ///   4. Navigate using A* toward the appropriate target tile.
 ///
 /// Required components on this GameObject:
-///   - NoiseSensor
-///   - LightSensor
-///   - VisionSensor
-///   - SpriteRenderer (for direction indicator)
+///   - NoiseSensor, LightSensor, VisionSensor
 ///
 /// Setup:
-///   - Assign PatrolWaypoints (list of world positions) in Inspector.
-///   - Assign PlayerController reference.
+///   - Assign PatrolWaypoints (list of Transforms) in Inspector.
+///   - Assign PlayerController reference in Inspector.
 ///   - Assign StateLabel (TextMeshPro) for the floating state text.
 /// </summary>
 [RequireComponent(typeof(NoiseSensor))]
@@ -43,9 +40,9 @@ public class GuardController : MonoBehaviour
     public List<Transform> PatrolWaypoints;
 
     [Header("Movement Speed")]
-    public float PatrolSpeed      = 2.0f;
+    public float PatrolSpeed = 2.0f;
     public float InvestigateSpeed = 2.8f;
-    public float ChaseSpeed       = 4.5f;
+    public float ChaseSpeed = 4.5f;
 
     [Header("Inference")]
     [Tooltip("How often (seconds) VE is re-run. Lower = more responsive, higher = cheaper.")]
@@ -57,71 +54,77 @@ public class GuardController : MonoBehaviour
 
     // ── Public State (read by UI) ────────────────────────────────────────
 
-    /// <summary>Current guard state (Patrolling / Investigating / Chasing).</summary>
     public GuardState CurrentState { get; private set; } = GuardState.Patrolling;
-
-    /// <summary>Latest VE posterior: key=state name, value=probability.</summary>
     public Dictionary<string, float> LastPosterior { get; private set; }
-
-    /// <summary>Latest evidence snapshot (for debug panel).</summary>
     public Dictionary<string, string> LastEvidence { get; private set; }
 
     // ── Private ──────────────────────────────────────────────────────────
 
-    private GuardBayesNet      _bayesNet;
+    private GuardBayesNet _bayesNet;
     private VariableElimination _ve;
-    private NoiseSensor  _noiseSensor;
-    private LightSensor  _lightSensor;
+    private NoiseSensor _noiseSensor;
+    private LightSensor _lightSensor;
     private VisionSensor _visionSensor;
 
     private List<Vector2Int> _currentPath = new List<Vector2Int>();
-    private int              _pathIndex   = 0;
-    private int              _waypointIndex = 0;
+    private int _pathIndex = 0;
+    private int _waypointIndex = 0;
 
     private Vector2Int _lastKnownPlayerTile;
-    private float      _inferenceTimer = 0f;
-
-    // Cache for performance: only re-run VE when evidence changes
+    private float _inferenceTimer = 0f;
     private string _lastEvidenceKey = "";
 
     // ── Unity Lifecycle ──────────────────────────────────────────────────
 
     void Awake()
     {
-        _bayesNet    = new GuardBayesNet();
-        _ve          = new VariableElimination(_bayesNet);
+        _bayesNet = new GuardBayesNet();
+        _ve = new VariableElimination(_bayesNet);
         _noiseSensor = GetComponent<NoiseSensor>();
         _lightSensor = GetComponent<LightSensor>();
         _visionSensor = GetComponent<VisionSensor>();
 
+        // Initialise with safe defaults so LastPosterior is never null
         LastPosterior = new Dictionary<string, float>
         {
-            ["Patrolling"]   = 1f,
+            ["Patrolling"] = 1f,
             ["Investigating"] = 0f,
-            ["Chasing"]       = 0f
+            ["Chasing"] = 0f
         };
-        LastEvidence = new Dictionary<string, string>();
+        LastEvidence = new Dictionary<string, string>
+        {
+            ["NoiseLevel"] = "None",
+            ["LightExposure"] = "None",
+            ["VisualContact"] = "False"
+        };
     }
 
     void FixedUpdate()
     {
+        // If Player not assigned, just patrol — no inference needed
+        if (Player == null)
+        {
+            Navigate();
+            return;
+        }
+
         // 1. Collect sensor readings
         var evidence = CollectEvidence();
 
-        // 2. Run VE at the configured interval (or when evidence changes)
+        // 2. Run VE at the configured interval, or immediately when evidence changes
         _inferenceTimer += Time.fixedDeltaTime;
         string evidenceKey = EvidenceKey(evidence);
         if (_inferenceTimer >= InferenceInterval || evidenceKey != _lastEvidenceKey)
         {
             RunInference(evidence);
             _lastEvidenceKey = evidenceKey;
-            _inferenceTimer  = 0f;
+            _inferenceTimer = 0f;
         }
 
-        // 3. Update state label
+        // 3. Update floating state label
         UpdateStateLabel();
 
-        // 4. Navigate
+        // 4. Navigate toward target
         Navigate();
 
         // 5. Catch check
@@ -134,9 +137,9 @@ public class GuardController : MonoBehaviour
     {
         return new Dictionary<string, string>
         {
-            ["NoiseLevel"]    = _noiseSensor.NoiseLevel,
-            ["LightExposure"] = _lightSensor.LightExposure,
-            ["VisualContact"] = _visionSensor.VisualContact ? "True" : "False"
+            ["NoiseLevel"] = _noiseSensor != null ? _noiseSensor.NoiseLevel : "None",
+            ["LightExposure"] = _lightSensor != null ? _lightSensor.LightExposure : "None",
+            ["VisualContact"] = _visionSensor != null ? (_visionSensor.VisualContact ? "True" : "False") : "False"
         };
     }
 
@@ -144,11 +147,18 @@ public class GuardController : MonoBehaviour
     {
         LastEvidence = new Dictionary<string, string>(evidence);
 
-        // Run Variable Elimination: P(GuardAlertState | evidence)
         var posterior = _ve.Query("GuardAlertState", evidence);
+
+        // If VE returns null or empty, keep the previous posterior and skip
+        if (posterior == null || posterior.Count == 0)
+        {
+            Debug.LogWarning($"[Guard:{name}] VE returned null/empty posterior — keeping previous state.");
+            return;
+        }
+
+        // Assign BEFORE OnStateTransition so the log inside can safely read it
         LastPosterior = posterior;
 
-        // Transition to highest-probability state
         GuardState newState = ArgmaxState(posterior);
 
         if (newState != CurrentState)
@@ -157,9 +167,12 @@ public class GuardController : MonoBehaviour
             CurrentState = newState;
         }
 
-        // Remember last known player position when suspicious
-        if (newState == GuardState.Investigating || newState == GuardState.Chasing)
+        // Cache last known player tile when the guard becomes suspicious
+        if (Player != null &&
+            (newState == GuardState.Investigating || newState == GuardState.Chasing))
+        {
             _lastKnownPlayerTile = WorldToTile(Player.transform.position);
+        }
     }
 
     private GuardState ArgmaxState(Dictionary<string, float> posterior)
@@ -171,22 +184,24 @@ public class GuardController : MonoBehaviour
 
         return bestKey switch
         {
-            "Chasing"       => GuardState.Chasing,
+            "Chasing" => GuardState.Chasing,
             "Investigating" => GuardState.Investigating,
-            _               => GuardState.Patrolling
+            _ => GuardState.Patrolling
         };
     }
 
     private void OnStateTransition(GuardState from, GuardState to)
     {
-        // Clear path on state change so we recompute for new target
         _currentPath.Clear();
         _pathIndex = 0;
 
-        Debug.Log($"[Guard:{name}] {from} → {to}  " +
-                  $"P(P={LastPosterior["Patrolling"]:F2}, " +
-                  $"I={LastPosterior["Investigating"]:F2}, " +
-                  $"C={LastPosterior["Chasing"]:F2})");
+        // LastPosterior is guaranteed non-null here (assigned just before this call)
+        LastPosterior.TryGetValue("Patrolling", out float p);
+        LastPosterior.TryGetValue("Investigating", out float inv);
+        LastPosterior.TryGetValue("Chasing", out float c);
+
+        Debug.Log($"[Guard:{name}] {from} -> {to}  " +
+                  $"P(Patrol={p:F2}, Invest={inv:F2}, Chase={c:F2})");
     }
 
     // ── Navigation (A*) ──────────────────────────────────────────────────
@@ -197,31 +212,27 @@ public class GuardController : MonoBehaviour
         Vector2Int targetTile = GetTargetTile(guardTile);
         float speed = CurrentSpeedForState();
 
-        // Recompute path if we've consumed it or have none
+        // Recompute A* path if consumed or missing
         if (_currentPath == null || _pathIndex >= _currentPath.Count)
         {
             _currentPath = AStar.FindPath(guardTile, targetTile);
-            _pathIndex   = 0;
-
-            // If no path exists (blocked), stay put
+            _pathIndex = 0;
             if (_currentPath == null || _currentPath.Count == 0) return;
         }
 
-        // Move toward the next waypoint in the path
         if (_pathIndex < _currentPath.Count)
         {
             Vector3 target = TileToWorld(_currentPath[_pathIndex]);
-            transform.position = Vector3.MoveTowards(transform.position, target, speed * Time.fixedDeltaTime);
+            transform.position = Vector3.MoveTowards(
+                transform.position, target, speed * Time.fixedDeltaTime);
 
-            // Aim guard toward movement direction
-            Vector3 dir = (target - transform.position);
+            Vector3 dir = target - transform.position;
             if (dir.sqrMagnitude > 0.001f)
                 transform.up = dir.normalized;
 
             if (Vector3.Distance(transform.position, target) < 0.05f)
             {
                 _pathIndex++;
-                // If patrolling and reached end of sub-path, advance waypoint
                 if (CurrentState == GuardState.Patrolling && _pathIndex >= _currentPath.Count)
                     AdvanceWaypoint();
             }
@@ -230,18 +241,27 @@ public class GuardController : MonoBehaviour
 
     private Vector2Int GetTargetTile(Vector2Int guardTile)
     {
-        return CurrentState switch
+        switch (CurrentState)
         {
-            GuardState.Chasing       => WorldToTile(Player.transform.position),
-            GuardState.Investigating => _lastKnownPlayerTile,
-            _                        => GetPatrolTargetTile()
-        };
+            case GuardState.Chasing:
+                return Player != null ? WorldToTile(Player.transform.position) : guardTile;
+            case GuardState.Investigating:
+                return _lastKnownPlayerTile;
+            default:
+                return GetPatrolTargetTile();
+        }
     }
 
     private Vector2Int GetPatrolTargetTile()
     {
         if (PatrolWaypoints == null || PatrolWaypoints.Count == 0)
             return WorldToTile(transform.position);
+
+        // Skip any null waypoints
+        int safety = PatrolWaypoints.Count;
+        while (safety-- > 0 && PatrolWaypoints[_waypointIndex] == null)
+            _waypointIndex = (_waypointIndex + 1) % PatrolWaypoints.Count;
+
         return WorldToTile(PatrolWaypoints[_waypointIndex].position);
     }
 
@@ -256,9 +276,9 @@ public class GuardController : MonoBehaviour
     {
         return CurrentState switch
         {
-            GuardState.Chasing       => ChaseSpeed,
+            GuardState.Chasing => ChaseSpeed,
             GuardState.Investigating => InvestigateSpeed,
-            _                        => PatrolSpeed
+            _ => PatrolSpeed
         };
     }
 
@@ -279,15 +299,15 @@ public class GuardController : MonoBehaviour
         if (StateLabel == null) return;
         StateLabel.text = CurrentState switch
         {
-            GuardState.Chasing       => "[C]",
+            GuardState.Chasing => "[C]",
             GuardState.Investigating => "[I]",
-            _                        => "[P]"
+            _ => "[P]"
         };
         StateLabel.color = CurrentState switch
         {
-            GuardState.Chasing       => Color.red,
+            GuardState.Chasing => Color.red,
             GuardState.Investigating => Color.yellow,
-            _                        => Color.green
+            _ => Color.green
         };
     }
 

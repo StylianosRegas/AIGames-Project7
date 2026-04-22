@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.InputSystem;
 using TMPro;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -26,18 +27,18 @@ public class SuspicionMeter : MonoBehaviour
     public List<GuardController> Guards;
 
     [Header("UI Elements")]
-    public Slider   MeterSlider;   // non-interactable slider (0–1)
-    public Image    MeterFill;     // the fill image of the slider
+    public Slider MeterSlider;   // non-interactable slider (0–1)
+    public Image MeterFill;     // the fill image of the slider
     public TextMeshProUGUI StateText; // e.g. "PATROLLING"
 
     [Header("Colors")]
-    public Color PatrolColor      = Color.green;
+    public Color PatrolColor = Color.green;
     public Color InvestigateColor = Color.yellow;
-    public Color ChaseColor       = Color.red;
+    public Color ChaseColor = Color.red;
 
     // Cached nearest guard
     private GuardController _nearestGuard;
-    private Transform       _playerTransform;
+    private Transform _playerTransform;
 
     void Start()
     {
@@ -71,9 +72,9 @@ public class SuspicionMeter : MonoBehaviour
         // Update color
         Color targetColor = _nearestGuard.CurrentState switch
         {
-            GuardState.Chasing       => ChaseColor,
+            GuardState.Chasing => ChaseColor,
             GuardState.Investigating => InvestigateColor,
-            _                        => PatrolColor
+            _ => PatrolColor
         };
         if (MeterFill != null) MeterFill.color = targetColor;
 
@@ -82,9 +83,9 @@ public class SuspicionMeter : MonoBehaviour
         {
             StateText.text = _nearestGuard.CurrentState switch
             {
-                GuardState.Chasing       => "⚠ CHASING",
+                GuardState.Chasing => "⚠ CHASING",
                 GuardState.Investigating => "? INVESTIGATING",
-                _                        => "✓ PATROLLING"
+                _ => "✓ PATROLLING"
             };
             StateText.color = targetColor;
         }
@@ -135,7 +136,7 @@ public class DebugPanel : MonoBehaviour
 
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.Tab))
+        if (Keyboard.current != null && Keyboard.current.tabKey.wasPressedThisFrame)
         {
             _visible = !_visible;
             gameObject.SetActive(_visible);

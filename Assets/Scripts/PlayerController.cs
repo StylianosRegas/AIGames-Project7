@@ -1,7 +1,9 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 /// <summary>
 /// PlayerController — handles WASD movement, sneaking, treasure pickup, and exit.
+/// Uses the Unity Input System package.
 ///
 /// Setup:
 ///   - Attach to the Player GameObject.
@@ -10,57 +12,93 @@ using UnityEngine;
 ///
 /// Controls:
 ///   WASD / Arrow Keys — move
-///   Left Shift (held) — sneak (reduced speed, NoiseLevel = None)
+///   Left Shift (held) — sneak (reduced speed, NoiseLevel stays low)
 /// </summary>
 [RequireComponent(typeof(Rigidbody2D))]
 public class PlayerController : MonoBehaviour
 {
     [Header("Movement")]
-    public float WalkSpeed  = 3.5f;
+    public float WalkSpeed = 3.5f;
     public float SneakSpeed = 1.5f;
-    public float RunSpeed   = 5.5f;
 
     [Header("State")]
     public bool HasTreasure { get; private set; } = false;
 
-    /// <summary>
-    /// Current movement speed this frame — read by NoiseSensor.
-    /// </summary>
+    /// <summary>Current movement speed this frame — read by NoiseSensor.</summary>
     public float CurrentSpeed { get; private set; } = 0f;
 
-    /// <summary>
-    /// True when the player is actively sneaking (Shift held).
-    /// </summary>
+    /// <summary>True when the player is actively sneaking (Shift held).</summary>
     public bool IsSneaking { get; private set; } = false;
 
     private Rigidbody2D _rb;
-    private Vector2     _moveInput;
+    private Vector2 _moveInput;
+
+    // Input System action references — resolved once in Awake
+    private InputAction _moveAction;
+    private InputAction _sneakAction;
 
     void Awake()
     {
         _rb = GetComponent<Rigidbody2D>();
-        _rb.gravityScale = 0f; // top-down — no gravity
+        _rb.gravityScale = 0f;
+        _rb.freezeRotation = true;
+
+        // Use the default "Player" action map that ships with the Input System.
+        // If you have a custom Input Actions asset, replace these with your own bindings.
+        var playerInput = GetComponent<PlayerInput>();
+        if (playerInput != null)
+        {
+            // Prefer a PlayerInput component if one is attached
+            _moveAction = playerInput.actions["Move"];
+            _sneakAction = playerInput.actions.FindAction("Sneak");
+        }
+        else
+        {
+            // Fallback: create inline actions so the script works without
+            // a PlayerInput component or a custom asset
+            _moveAction = new InputAction("Move", binding: "<Gamepad>/leftStick");
+            _moveAction.AddCompositeBinding("2DVector")
+                .With("Up", "<Keyboard>/w")
+                .With("Up", "<Keyboard>/upArrow")
+                .With("Down", "<Keyboard>/s")
+                .With("Down", "<Keyboard>/downArrow")
+                .With("Left", "<Keyboard>/a")
+                .With("Left", "<Keyboard>/leftArrow")
+                .With("Right", "<Keyboard>/d")
+                .With("Right", "<Keyboard>/rightArrow");
+            _moveAction.Enable();
+
+            _sneakAction = new InputAction("Sneak", InputActionType.Button);
+            _sneakAction.AddBinding("<Keyboard>/leftShift");
+            _sneakAction.AddBinding("<Keyboard>/rightShift");
+            _sneakAction.Enable();
+        }
+    }
+
+    void OnDestroy()
+    {
+        // Clean up inline actions to avoid input system leaks
+        if (_moveAction != null && GetComponent<PlayerInput>() == null) _moveAction.Disable();
+        if (_sneakAction != null && GetComponent<PlayerInput>() == null) _sneakAction.Disable();
     }
 
     void Update()
     {
-        // Read input
-        _moveInput.x = Input.GetAxisRaw("Horizontal");
-        _moveInput.y = Input.GetAxisRaw("Vertical");
-        _moveInput.Normalize();
+        _moveInput = _moveAction?.ReadValue<Vector2>() ?? Vector2.zero;
+        _moveInput = Vector2.ClampMagnitude(_moveInput, 1f); // normalise analog sticks
 
-        IsSneaking = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+        IsSneaking = _sneakAction?.IsPressed() ?? false;
     }
 
     void FixedUpdate()
     {
         float speed = IsSneaking ? SneakSpeed : WalkSpeed;
-        Vector2 velocity = _moveInput * speed;
-        _rb.MovePosition(_rb.position + velocity * Time.fixedDeltaTime);
+        Vector2 delta = _moveInput * speed * Time.fixedDeltaTime;
+        _rb.MovePosition(_rb.position + delta);
 
-        CurrentSpeed = velocity.magnitude;
+        CurrentSpeed = delta.magnitude / Time.fixedDeltaTime; // world units / second
 
-        // Face direction of movement
+        // Rotate sprite to face movement direction
         if (_moveInput.sqrMagnitude > 0.01f)
             transform.up = _moveInput;
     }
